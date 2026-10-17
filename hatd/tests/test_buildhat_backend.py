@@ -485,22 +485,26 @@ async def test_unresponsive_hat_frees_threads_and_reports(fake_buildhat, monkeyp
     backend = BuildHatBackend()
     await backend.start()
     FakeHangingColorDistance.hang = True
-    FakeHat.vin_hangs = True
     try:
         with pytest.raises(B3Error) as e:
             for _ in range(40):  # telemetry steps until the stuck read is older than HAT_TIMEOUT
                 await backend.read()
                 await asyncio.sleep(0.05)
         assert e.value.code == "hat_not_responding"
-        with pytest.raises(B3Error) as e:
-            await backend.vin()
-        assert e.value.code == "hat_not_responding"
-        await asyncio.sleep(0.1)
-        assert FakeHat.vin_released, "the thread stuck in get_vin was woken"
         assert fake_buildhat.devices.Device._instance.portftr[0] == []
     finally:
         FakeHangingColorDistance.hang = False
         await backend.close()
+
+
+async def test_silent_vin_wakes_its_thread_and_reports(hat, monkeypatch):
+    monkeypatch.setattr("b3hatd.buildhat_backend.HAT_TIMEOUT", 0.3)
+    FakeHat.vin_hangs = True
+    with pytest.raises(B3Error) as e:
+        await hat.vin()
+    assert e.value.code == "hat_not_responding"
+    await asyncio.sleep(0.1)
+    assert FakeHat.vin_released, "the thread stuck in get_vin was woken"
 
 
 async def test_long_movement_is_not_a_hang(hat, monkeypatch):
@@ -583,3 +587,29 @@ async def test_stop_all_then_running_ends_active(fake_buildhat, monkeypatch):
     await stop
     assert backend._active
     await backend.close()
+
+
+async def test_hat_silent_while_a_device_attaches_is_reported(fake_buildhat, monkeypatch):
+    # the first read of a newly attached device must not hang start() or a refresh forever
+    monkeypatch.setattr("b3hatd.buildhat_backend.HAT_TIMEOUT", 0.3)
+    monkeypatch.setattr(fake_buildhat, "ColorDistanceSensor", FakeHangingColorDistance)
+    monkeypatch.setattr(FakeHangingColorDistance, "used", set())
+    monkeypatch.setattr(FakeHat, "types", {"A": 37, "B": -1, "C": -1, "D": -1})
+    FakeHangingColorDistance.hang = True
+    backend = BuildHatBackend()
+    try:
+        with pytest.raises(B3Error) as e:
+            await asyncio.wait_for(backend.start(), 3)
+        assert e.value.code == "hat_not_responding"
+    finally:
+        FakeHangingColorDistance.hang = False
+        await backend.close()
+
+
+async def test_no_new_buildhat_calls_after_the_hat_went_silent(hat):
+    with pytest.raises(B3Error):
+        hat._unresponsive()
+    with pytest.raises(B3Error) as e:
+        await hat.motor_start("A", 20)
+    assert e.value.code == "hat_not_responding"
+

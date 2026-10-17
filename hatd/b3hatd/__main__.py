@@ -2,7 +2,7 @@
 
 import argparse
 import logging
-import sys
+import os
 from pathlib import Path
 
 from aiohttp import web
@@ -63,7 +63,9 @@ def main(argv: list[str] | None = None) -> None:
     app = build(args.config, args.sim, args.sim_devices)
     web.run_app(app, host=config.http_host, port=config.http_port, shutdown_timeout=5)
     if app[EXIT_CODE]["code"]:
-        sys.exit(app[EXIT_CODE]["code"])
+        # threads stuck on the silent HAT are not daemons; a normal exit would wait for them forever
+        logging.shutdown()
+        os._exit(app[EXIT_CODE]["code"])
 
 
 if __name__ == "__main__":

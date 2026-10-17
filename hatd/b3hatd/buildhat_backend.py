@@ -59,6 +59,7 @@ READ_WAIT = 0.03
 
 # A healthy read answers within ~50 ms; one older than this means the HAT went silent
 HAT_TIMEOUT = 3.0
+_SILENT_MESSAGE = "Build HAT is not responding. B3 restarts it; reconnect in a moment."
 
 _DIRECTIONS = {"shortest": "shortest", "cw": "clockwise", "ccw": "anticlockwise"}
 
@@ -155,6 +156,7 @@ class BuildHatBackend(HatBackend):
         self._hw_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="b3-hw")
         self._read_started: dict[str, float] = {}
         self._active = False  # a program runs: read every mode of multi-mode sensors
+        self._silent = False  # the HAT stopped answering; hatd is about to restart
         self._fill: set[str] = set()  # ports to read in every mode at once (program just started)
         self._generation: dict[str, int] = {p: 0 for p in PORTS}
         self._stops: dict[str, set[asyncio.Event]] = {p: set() for p in PORTS}
@@ -188,6 +190,8 @@ class BuildHatBackend(HatBackend):
         self._hw_pool.shutdown(wait=False)
 
     async def _run(self, fn, *args, **kwargs):
+        if self._silent:  # no new thread may block on a HAT that stopped answering
+            raise B3Error("hat_not_responding", _SILENT_MESSAGE)
         return await asyncio.get_running_loop().run_in_executor(self._hw_pool, partial(fn, *args, **kwargs))
 
     # --- ports ------------------------------------------------------------
@@ -215,11 +219,14 @@ class BuildHatBackend(HatBackend):
                 if dev_info is None:
                     continue
                 try:
-                    dev = await self._run(self._open, p, dev_info.kind)
-                    self._values[p] = await self._run(_read_all, dev, self._readers(dev_info.kind))
+                    # opening and the first read wait on the firmware like any read: watch them too
+                    dev, values = await asyncio.wait_for(self._attach(p, dev_info.kind), HAT_TIMEOUT)
+                    self._values[p] = values
                     self._devices[p] = dev
                     self._kinds[p] = dev_info.kind
                     self._commanded[p] = dict(_COMMANDED_DEFAULTS.get(dev_info.kind, {}))
+                except asyncio.TimeoutError:
+                    self._unresponsive()
                 except Exception as e:
                     # e.g. "Port already used" while the old object is still referenced;
                     # report the port empty so the next refresh tries again
@@ -228,6 +235,10 @@ class BuildHatBackend(HatBackend):
                     # a woken thread's traceback keeps the old device in a reference cycle;
                     # buildhat frees the port only in Device.__del__
                     gc.collect()
+
+    async def _attach(self, port: str, kind: Kind):
+        dev = await self._run(self._open, port, kind)
+        return dev, await self._run(_read_all, dev, self._readers(kind))
 
     def _require(self, port: str):
         dev = self._devices.get(port)
@@ -243,6 +254,8 @@ class BuildHatBackend(HatBackend):
         """Run a blocking buildhat call in a thread; library errors name the port."""
         try:
             return await self._run(fn, *args, **kwargs)
+        except B3Error:
+            raise
         except Exception as e:
             raise B3Error("hardware_error", f"Port {port}: {e}", port=port) from e
 
@@ -391,6 +404,7 @@ class BuildHatBackend(HatBackend):
     def _unresponsive(self) -> None:
         """The HAT stopped answering: wake every thread waiting on it, then give up."""
         log.error("Build HAT not responding")
+        self._silent = True
         error = RuntimeError("Build HAT not responding")
         for p in PORTS:
             self._fail_port_waiters(p, error)
@@ -402,7 +416,7 @@ class BuildHatBackend(HatBackend):
                 ftr.set_exception(error)
             except InvalidStateError:
                 pass
-        raise B3Error("hat_not_responding", "Build HAT is not responding. B3 restarts it; reconnect in a moment.")
+        raise B3Error("hat_not_responding", _SILENT_MESSAGE)
 
     async def motor_run_for_degrees(self, port, degrees, speed):
         self._require(port)

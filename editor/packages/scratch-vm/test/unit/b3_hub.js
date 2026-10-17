@@ -299,3 +299,29 @@ test('hatd reporting a silent Build HAT stops the program and says so', async t 
     t.equal(runtime.stopped, 1);
     t.same(errors, ['Build HAT is not responding.']);
 });
+
+const runningSent = ws => ws.sent.filter(m => m.cmd === 'program.running').map(m => m.args.running);
+
+test('a clicked script counts as a running program while its threads run', async t => {
+    const {runtime} = await connected('me');
+    runtime.emit('PROJECT_RUN_START');
+    runtime.emit('PROJECT_RUN_STOP');
+    t.same(runningSent(FakeWebSocket.last), [true, false]);
+});
+
+test('threads ending inside a Run keep the program running until Stop', async t => {
+    const {runtime} = await connected('me');
+    runtime.emit('PROJECT_START');
+    runtime.emit('PROJECT_RUN_START');
+    runtime.emit('PROJECT_RUN_STOP');
+    t.same(runningSent(FakeWebSocket.last), [true], 'hats stay armed until Stop');
+});
+
+test('taking control while a program runs tells hatd it runs', async t => {
+    const {hub, runtime} = await connected('someone');
+    runtime.emit('PROJECT_START');
+    t.same(runningSent(FakeWebSocket.last), [], 'not in control yet');
+    FakeWebSocket.last.receive({type: 'control', holder: 'me', you: true});
+    t.ok(hub.isController);
+    t.same(runningSent(FakeWebSocket.last), [true]);
+});

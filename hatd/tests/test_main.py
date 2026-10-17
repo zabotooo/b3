@@ -51,3 +51,19 @@ def test_version_flag(capsys):
         main(["--version"])
     assert exc.value.code == 0
     assert capsys.readouterr().out.strip() == "b3hatd 0.1.0"
+
+
+def test_fatal_exit_does_not_wait_for_stuck_threads(tmp_path, monkeypatch):
+    # buildhat threads stuck on a silent HAT are not daemons: a normal exit would join them forever
+    import b3hatd.__main__ as main_module
+    from b3hatd.keys import EXIT_CODE
+
+    app = build(_config(tmp_path), sim=True)
+    app[EXIT_CODE]["code"] = 75
+    monkeypatch.setattr(main_module, "build", lambda *args: app)
+    monkeypatch.setattr(main_module.web, "run_app", lambda *args, **kwargs: None)
+    exits = []
+    monkeypatch.setattr(main_module.os, "_exit", lambda code: exits.append(code))
+    main(["--config", str(_config(tmp_path)), "--sim"])
+    assert exits == [75]
+
