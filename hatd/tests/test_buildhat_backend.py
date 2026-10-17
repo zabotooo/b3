@@ -26,6 +26,8 @@ class FakeInstance:
         self.rampftr = [[] for _ in range(4)]
         self.pulseftr = [[] for _ in range(4)]
         self.cbqueue = queue.Queue()
+        self.portftr = [[] for _ in range(4)]
+        self.vinftr = []
 
 
 class FakeHat:
@@ -139,6 +141,38 @@ class FakeColorDistance:
     def get_distance(self):
         self.calls.append("distance")
         return 5
+
+
+class FakeHangingColorDistance:
+    """Like buildhat: the port is free again only when the object is deleted, and a
+    getter waits on a portftr future that only the firmware resolves."""
+    used: set = set()
+    hang = False
+
+    def __init__(self, port):
+        self.idx = "ABCD".index(port)
+        if self.idx in FakeHangingColorDistance.used:
+            raise RuntimeError("Port already used")
+        FakeHangingColorDistance.used.add(self.idx)
+
+    def __del__(self):
+        FakeHangingColorDistance.used.discard(self.idx)
+
+    def _value(self, value):
+        if FakeHangingColorDistance.hang:
+            ftr = Future()
+            FakeMotor.instance.portftr[self.idx].append(ftr)
+            ftr.result(timeout=10)  # real buildhat waits forever; bounded so tests end
+        return value
+
+    def get_color(self):
+        return self._value("red")
+
+    def get_reflected_light(self):
+        return self._value(40)
+
+    def get_distance(self):
+        return self._value(5)
 
 
 class FakePassiveMotor:
@@ -385,3 +419,28 @@ async def test_slow_sensor_does_not_hold_up_telemetry(fake_buildhat, monkeypatch
     assert slowest < 0.05
     assert values["A"]["reflection"] == 77  # the slow value still arrives
     await backend.close()
+
+
+async def test_device_that_dropped_off_while_reading_is_opened_again(fake_buildhat, monkeypatch):
+    monkeypatch.setattr(fake_buildhat, "ColorDistanceSensor", FakeHangingColorDistance)
+    monkeypatch.setattr(FakeHangingColorDistance, "used", set())
+    monkeypatch.setattr(FakeHat, "types", {"A": 37, "B": -1, "C": -1, "D": -1})
+    backend = BuildHatBackend()
+    await backend.start()
+    FakeHangingColorDistance.hang = True
+    try:
+        await backend.read()  # a read starts and waits for a frame that never comes
+        FakeHat.types = {"A": -1, "B": -1, "C": -1, "D": -1}  # sensor drops off
+        await backend.read()
+        FakeHangingColorDistance.hang = False
+        FakeHat.types = {"A": 37, "B": -1, "C": -1, "D": -1}  # and comes back
+        for _ in range(20):
+            await backend.read()
+            if backend.typeids()["A"] == 37:
+                break
+            await asyncio.sleep(0.05)
+        assert backend.typeids()["A"] == 37
+        assert "A" in backend._devices
+    finally:
+        FakeHangingColorDistance.hang = False
+        await backend.close()

@@ -1,6 +1,7 @@
 """HatBackend on top of the blocking `buildhat` library."""
 
 import asyncio
+import gc
 import logging
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from functools import partial
@@ -170,6 +171,8 @@ class BuildHatBackend(HatBackend):
                 self._values.pop(p, None)
                 self._interrupt(p)
                 self._release_waiters(p)
+                self._fail_port_waiters(p, RuntimeError(f"port {p}: device changed"))
+                self._reading.pop(p, None)
                 dev_info = lookup(typeid)
                 if dev_info is None:
                     continue
@@ -184,6 +187,9 @@ class BuildHatBackend(HatBackend):
                     # report the port empty so the next refresh tries again
                     log.warning("cannot open %s on port %s: %s", dev_info.name, p, e)
                     self._types[p] = None
+                    # a woken thread's traceback keeps the old device in a reference cycle;
+                    # buildhat frees the port only in Device.__del__
+                    gc.collect()
 
     def _require(self, port: str):
         dev = self._devices.get(port)
@@ -207,6 +213,21 @@ class BuildHatBackend(HatBackend):
         self._generation[port] += 1
         for ev in list(self._stops[port]):
             ev.set()
+
+    def _fail_port_waiters(self, port: str, error: Exception) -> None:
+        """Wake every thread waiting on this port's firmware replies with `error`.
+        buildhat waits on these futures without a timeout; a device that dropped off
+        (or a silent HAT) would hold such a thread, and the old device object, forever."""
+        hat = self._buildhat.devices.Device._instance
+        i = PORTS.index(port)
+        for lists in (hat.portftr, hat.rampftr, hat.pulseftr):
+            pending = list(lists[i])
+            lists[i].clear()
+            for ftr in pending:
+                try:
+                    ftr.set_exception(error)
+                except InvalidStateError:
+                    pass
 
     def _check(self, port: str, gen: int) -> None:
         if self._generation[port] != gen:
