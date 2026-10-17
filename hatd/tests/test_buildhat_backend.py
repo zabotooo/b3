@@ -510,3 +510,34 @@ async def test_long_movement_is_not_a_hang(hat, monkeypatch):
     await hat.motor_stop("A")
     with pytest.raises(B3Error):
         await task
+
+
+class FakeHatNotFoundOnce(FakeHat):
+    failures = 1
+
+    def __init__(self):
+        if FakeHatNotFoundOnce.failures:
+            FakeHatNotFoundOnce.failures -= 1
+            raise RuntimeError("HAT not found")
+
+
+async def test_hat_not_found_is_reset_and_retried(fake_buildhat, monkeypatch):
+    monkeypatch.setattr(fake_buildhat, "Hat", FakeHatNotFoundOnce)
+    monkeypatch.setattr(FakeHatNotFoundOnce, "failures", 1)
+    resets = []
+    backend = BuildHatBackend(reset=lambda: resets.append(1))
+    await backend.start()
+    assert resets == [1]
+    assert backend.typeids()["A"] == 48
+    await backend.close()
+
+
+async def test_other_start_errors_are_not_retried(fake_buildhat, monkeypatch):
+    def broken():
+        raise RuntimeError("no serial port")
+    monkeypatch.setattr(fake_buildhat, "Hat", broken)
+    resets = []
+    backend = BuildHatBackend(reset=lambda: resets.append(1))
+    with pytest.raises(RuntimeError, match="no serial port"):
+        await backend.start()
+    assert resets == []

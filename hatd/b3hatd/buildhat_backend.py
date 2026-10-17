@@ -70,6 +70,24 @@ _COMMANDED_DEFAULTS = {
 }
 
 
+def reset_hat() -> None:
+    """Restart the HAT into its bootloader, as buildhat does before loading new firmware.
+    buildhat itself only resets on a firmware version mismatch, so a HAT whose firmware
+    hung answers nothing and Hat() reports "HAT not found"."""
+    import time
+    from gpiozero import DigitalOutputDevice  # Pi only
+    reset = DigitalOutputDevice(4)
+    boot0 = DigitalOutputDevice(22)
+    boot0.off()
+    reset.off()
+    time.sleep(0.01)
+    reset.on()
+    time.sleep(0.01)
+    boot0.close()
+    reset.close()
+    time.sleep(0.5)
+
+
 class _Waiters(list):
     """buildhat's per-port list of movement futures. hatd releases the futures of
     cut-short movements itself (see _release_waiters); when the firmware still reports
@@ -120,7 +138,8 @@ class BuildHatBackend(HatBackend):
     "generation"; anything that bumps the generation interrupts the older commands.
     """
 
-    def __init__(self):
+    def __init__(self, reset=reset_hat):
+        self._reset = reset
         self._buildhat = None
         self._hat = None
         self._types: dict[str, int | None] = {p: None for p in PORTS}
@@ -143,7 +162,14 @@ class BuildHatBackend(HatBackend):
     async def start(self) -> None:
         import buildhat  # Pi only
         self._buildhat = buildhat
-        self._hat = await self._run(buildhat.Hat)  # loads firmware on first run
+        try:
+            self._hat = await self._run(buildhat.Hat)  # loads firmware on first run
+        except Exception as e:
+            if "HAT not found" not in str(e):
+                raise
+            log.warning("Build HAT not answering; resetting it")
+            await self._run(self._reset)
+            self._hat = await self._run(buildhat.Hat)
         hat = buildhat.devices.Device._instance
         for lists in (hat.rampftr, hat.pulseftr):
             for i, pending in enumerate(lists):
