@@ -168,3 +168,26 @@ After plan 3b, with B3 0.1.0 and the service updated through `install.sh`:
 
 Note: port C (Large Angular) once was not detected until its cable was reseated; this was a loose plug,
 not software.
+
+## Motor stopping accuracy (2026-10-17)
+
+buildhat's positional moves (`run_to_position`, `run_for_degrees`) plan a fast ramp, wait 0.2 s after
+it and then release (coast) the motor; a fast move then rolls on. The user saw "go to position 0" end
+past 0 on the other side each time.
+
+Measured on a Large Angular motor (port C), error after 1 s:
+
+| Move | buildhat default | hold until on target and not moving, then release |
+|---|---|---|
+| go to 0 from 6 positions, speed 40 / 75 / 100 % | up to 13° / 31° | at most 4° (all speeds) |
+| run for 90/360/-180/720°, speed 40 / 75 % | up to 19° / 148° | at most 4° / 3° |
+| holding forever (Pybricks-style `Stop.HOLD`) | | at most 2°, but the motor stays powered |
+
+hatd now holds the motor (`release = False`) after these moves until it is within 3° of the target
+and not moving for 3 reads (at most 1.5 s), then coasts it, so it can be turned by hand. A block takes
+about 0.6 s longer. A stop while holding releases the motor at once.
+
+Hardware suite after the change (3 runs): `run_for_degrees 90` moved 86-90°, `go_to 270` ended at
+-87…-88 (target -90). `test_start_right_after_stop_keeps_running` was flaky before (a Technic XL at
+30 % reports a speed of 3-12 0.6 s after start); it and `test_new_command_replaces_running_move` now
+check the angle turned in 0.5 s.
