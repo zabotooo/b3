@@ -69,7 +69,8 @@ class FakeMotor:
         self.release = True  # buildhat: coast 0.2 s after a movement
         self.release_seen = None
         self.apos = 0
-        self._target = None
+        self.pos = 0
+        self._target = None  # (attribute, value) the motor reaches after `lag` more reads
         self._lag = 0
 
     # firmware simulation ------------------------------------------------
@@ -104,6 +105,8 @@ class FakeMotor:
     # buildhat Motor API ---------------------------------------------------
     def run_for_degrees(self, degrees, speed=None, blocking=True):
         self.log.append(("run_for_degrees", degrees, speed))
+        self.release_seen = self.release
+        self._target, self._lag = ("pos", self.pos + (degrees if speed >= 0 else -degrees)), FakeMotor.lag
         self.speed = speed
         self._move(FakeMotor.instance.rampftr, degrees / (abs(speed) * 10))
 
@@ -117,7 +120,7 @@ class FakeMotor:
             raise RuntimeError("Invalid angle")
         self.log.append(("run_to_position", degrees, speed, direction))
         self.release_seen = self.release
-        self._target, self._lag = degrees, FakeMotor.lag
+        self._target, self._lag = ("apos", degrees), FakeMotor.lag
         self._move(FakeMotor.instance.rampftr, 0.05)
 
     def start(self, speed=None):
@@ -139,8 +142,9 @@ class FakeMotor:
             if self._lag > 0:
                 self._lag -= 1
             else:
-                self.apos, self._target = self._target, None
-        return [self.speed, 0, self.apos]
+                setattr(self, *self._target)
+                self._target = None
+        return [self.speed, self.pos, self.apos]
 
     def get_position(self):
         raise AssertionError("each getter waits for a data frame; read all with get()")
@@ -310,7 +314,8 @@ async def test_second_run_for_replaces_first(hat):
 
 
 async def test_stop_while_new_command_settles_is_not_lost(hat):
-    first = asyncio.create_task(hat.motor_run_for_degrees("A", 3600, 10))
+    # run_for_seconds still ends with buildhat's own trailing coast, which the new command waits for
+    first = asyncio.create_task(hat.motor_run_for_seconds("A", 36, 10))
     await asyncio.sleep(0.1)
     second = asyncio.create_task(hat.motor_start("A", 30))  # settles ~0.1 s
     await asyncio.sleep(0.02)
@@ -662,4 +667,14 @@ async def test_stop_while_settling_ends_at_once(hat, monkeypatch):
             break
         await asyncio.sleep(0.05)
     assert hat._inflight["A"].done(), "the holding thread noticed the stop"
+
+
+async def test_run_for_degrees_holds_until_the_motor_stands_on_target(hat, monkeypatch):
+    monkeypatch.setattr(FakeMotor, "lag", 5)
+    await asyncio.wait_for(hat.motor_run_for_degrees("A", 360, -75), 3)
+    dev = hat._devices["A"]
+    assert dev.release_seen is False
+    assert dev.pos == -360 and dev._lag == 0, "waited until the motor reported the target"
+    assert dev.release is True
+    assert dev.log[-1] == ("coast",)
 

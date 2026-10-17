@@ -431,7 +431,16 @@ class BuildHatBackend(HatBackend):
         self._require(port)
         gen = await self._begin(port)
         dev = self._require(port)
-        await self._blocking(port, gen, dev.run_for_degrees, degrees, speed=speed, blocking=True)
+        start = {}
+
+        def move():
+            start["position"] = dev.get()[1]
+            dev.run_for_degrees(degrees, speed=speed, blocking=True)
+
+        def off_target(values):  # buildhat turns the other way for a negative speed
+            return values[1] - (start["position"] + (degrees if speed >= 0 else -degrees))
+
+        await self._blocking(port, gen, self._held_move, port, gen, dev, off_target, move)
 
     async def motor_run_for_seconds(self, port, seconds, speed):
         self._require(port)
