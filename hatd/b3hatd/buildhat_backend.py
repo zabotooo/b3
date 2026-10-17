@@ -129,6 +129,8 @@ class BuildHatBackend(HatBackend):
         # one reader thread per port, separate from the pool that runs motor commands
         self._read_pool = ThreadPoolExecutor(max_workers=len(PORTS), thread_name_prefix="b3-read")
         self._reading: dict[str, asyncio.Future] = {}
+        # all blocking buildhat calls; aiohttp's default pool stays free for files and logins
+        self._hw_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="b3-hw")
         self._generation: dict[str, int] = {p: 0 for p in PORTS}
         self._stops: dict[str, set[asyncio.Event]] = {p: set() for p in PORTS}
         self._inflight: dict[str, asyncio.Future] = {}
@@ -137,7 +139,7 @@ class BuildHatBackend(HatBackend):
     async def start(self) -> None:
         import buildhat  # Pi only
         self._buildhat = buildhat
-        self._hat = await asyncio.to_thread(buildhat.Hat)  # loads firmware on first run
+        self._hat = await self._run(buildhat.Hat)  # loads firmware on first run
         hat = buildhat.devices.Device._instance
         for lists in (hat.rampftr, hat.pulseftr):
             for i, pending in enumerate(lists):
@@ -151,6 +153,10 @@ class BuildHatBackend(HatBackend):
         self._devices.clear()
         self._kinds.clear()
         self._read_pool.shutdown(wait=False)
+        self._hw_pool.shutdown(wait=False)
+
+    async def _run(self, fn, *args, **kwargs):
+        return await asyncio.get_running_loop().run_in_executor(self._hw_pool, partial(fn, *args, **kwargs))
 
     # --- ports ------------------------------------------------------------
     def _open(self, port: str, kind: Kind):
@@ -158,7 +164,7 @@ class BuildHatBackend(HatBackend):
 
     async def _refresh(self) -> None:
         async with self._lock:
-            info = await asyncio.to_thread(self._hat.get)
+            info = await self._run(self._hat.get)
             for p in PORTS:
                 typeid = info[p]["typeid"]
                 typeid = None if typeid == -1 else typeid
@@ -177,8 +183,8 @@ class BuildHatBackend(HatBackend):
                 if dev_info is None:
                     continue
                 try:
-                    dev = await asyncio.to_thread(self._open, p, dev_info.kind)
-                    self._values[p] = await asyncio.to_thread(_read_all, dev, dev_info.kind)
+                    dev = await self._run(self._open, p, dev_info.kind)
+                    self._values[p] = await self._run(_read_all, dev, dev_info.kind)
                     self._devices[p] = dev
                     self._kinds[p] = dev_info.kind
                     self._commanded[p] = dict(_COMMANDED_DEFAULTS.get(dev_info.kind, {}))
@@ -204,7 +210,7 @@ class BuildHatBackend(HatBackend):
     async def _call(self, port: str, fn, *args, **kwargs):
         """Run a blocking buildhat call in a thread; library errors name the port."""
         try:
-            return await asyncio.to_thread(fn, *args, **kwargs)
+            return await self._run(fn, *args, **kwargs)
         except Exception as e:
             raise B3Error("hardware_error", f"Port {port}: {e}", port=port) from e
 
@@ -326,7 +332,7 @@ class BuildHatBackend(HatBackend):
             self._values[port].update(fut.result())
 
     async def vin(self) -> float:
-        return await asyncio.to_thread(self._hat.get_vin)
+        return await self._run(self._hat.get_vin)
 
     async def motor_run_for_degrees(self, port, degrees, speed):
         self._require(port)

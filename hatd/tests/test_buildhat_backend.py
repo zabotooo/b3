@@ -12,7 +12,7 @@ import threading
 import time
 import types
 import weakref
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 import pytest_asyncio
@@ -444,3 +444,19 @@ async def test_device_that_dropped_off_while_reading_is_opened_again(fake_buildh
     finally:
         FakeHangingColorDistance.hang = False
         await backend.close()
+
+
+class _NoDefaultPool(ThreadPoolExecutor):
+    def submit(self, *args, **kwargs):
+        raise AssertionError("buildhat call on the event loop's default thread pool")
+
+
+async def test_buildhat_calls_leave_the_default_pool_free(hat):
+    # aiohttp serves files through the default pool; stuck hardware calls must not starve it
+    asyncio.get_running_loop().set_default_executor(_NoDefaultPool(max_workers=1))
+    await hat.read()
+    await hat.vin()
+    await hat.motor_run_for_degrees("A", 90, 50)
+    await hat.motor_start("A", 20)
+    await hat.motor_stop("A")
+    await hat.stop_all()
