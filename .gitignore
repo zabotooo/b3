@@ -1,0 +1,7 @@
+.superpowers/
+editor/node_modules/
+editor/packages/*/node_modules/
+editor/packages/*/build/
+editor/packages/*/dist/
+editor/packages/*/build-b3/
+CLAUDE.md

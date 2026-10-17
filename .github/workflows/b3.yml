@@ -1,0 +1,90 @@
+name: B3
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  hatd:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Same library versions as Raspberry Pi OS bookworm
+        run: pip install aiohttp==3.8.4 pytest==7.2.1 pytest-asyncio==0.20.3
+      - name: hatd and installer tests
+        working-directory: hatd
+        run: python -m pytest -q
+
+  editor:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: editor/.nvmrc
+          cache: npm
+          cache-dependency-path: editor/package-lock.json
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Libraries for canvas (scratch-paint) and hatd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev
+          pip install aiohttp==3.8.4
+      - name: Install editor dependencies
+        working-directory: editor
+        run: NODE_ENV=development npm ci
+      - name: Build the packages scratch-gui depends on
+        working-directory: editor
+        run: |
+          for p in task-herder scratch-storage scratch-svg-renderer scratch-paint scratch-render scratch-vm; do
+            NODE_ENV=production npm run build --workspace=packages/$p
+          done
+      - name: B3 tests in scratch-vm
+        working-directory: editor/packages/scratch-vm
+        run: npx tap test/unit/b3_*.js
+      - name: scratch-gui unit tests
+        working-directory: editor/packages/scratch-gui
+        run: npm run test:unit
+      - name: Production editor build
+        working-directory: editor/packages/scratch-gui
+        run: npm run build:b3
+      - name: End-to-end tests against hatd --sim
+        run: |
+          (cd editor/packages/scratch-gui && npx playwright install --with-deps chromium)
+          ci/e2e.sh
+      - name: Release archive
+        run: install/make-release.sh editor/packages/scratch-gui/build-b3 b3.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b3
+          path: b3.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [hatd, editor]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: b3
+      - name: Tag matches the hatd version
+        run: |
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' hatd/b3hatd/__init__.py)
+          test "${GITHUB_REF_NAME#v}" = "$version" || { echo "tag $GITHUB_REF_NAME != hatd $version"; exit 1; }
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" b3.tar.gz install/install.sh --title "B3 $GITHUB_REF_NAME" --generate-notes

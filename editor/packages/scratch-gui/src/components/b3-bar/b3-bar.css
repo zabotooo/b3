@@ -1,0 +1,19 @@
+.bar { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.25rem 0.5rem; background: #f4f6fb; border-bottom: 1px solid #d9e0ec; font-size: 0.85rem; }
+.row { display: flex; align-items: center; gap: 0.5rem; }
+.run, .stop { width: 2.5rem; height: 2rem; border: none; border-radius: 0.5rem; font-size: 1rem; cursor: pointer; color: #fff; }
+.run { background: #2fb344; }
+.run:disabled { background: #a8c7ae; cursor: default; }
+.stop { background: #e5484d; }
+.status { color: #3c4a60; }
+.control { color: #2fb344; font-weight: 600; }
+.take { border: 1px solid #0090f5; color: #0090f5; background: #fff; border-radius: 0.5rem; padding: 0.25rem 0.5rem; cursor: pointer; }
+.ports { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: stretch; }
+.port { min-width: 9rem; padding: 0.25rem 0.5rem; background: #fff; border: 1px solid #d9e0ec; border-radius: 0.5rem; }
+.port-title { color: #3c4a60; font-size: 0.75rem; }
+.port-value { font-weight: 600; }
+.warning { align-self: center; color: #b45309; font-weight: 600; }
+.error { display: flex; justify-content: space-between; align-items: center; background: #fde8e8; color: #9b1c1c; padding: 0.25rem 0.5rem; border-radius: 0.5rem; }
+.error button { border: none; background: none; font-size: 1rem; cursor: pointer; }
+.pin-dialog { display: flex; gap: 0.5rem; align-items: center; }
+.pin-dialog input { width: 6rem; }
+.pin-error { color: #9b1c1c; }
