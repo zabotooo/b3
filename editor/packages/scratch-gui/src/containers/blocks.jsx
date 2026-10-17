@@ -34,6 +34,7 @@ import {closeExtensionLibrary, openSoundRecorder, openConnectionModal} from '../
 import {activateCustomProcedures, deactivateCustomProcedures} from '../reducers/custom-procedures';
 import {setConnectionModalExtensionId} from '../reducers/connection-modal';
 import {updateMetrics} from '../reducers/workspace-metrics';
+import {attachFlyoutResizer} from '../lib/b3-flyout-resizer';
 import {isTimeTravel2020} from '../reducers/time-travel';
 
 import {
@@ -177,6 +178,8 @@ class Blocks extends React.Component {
         addFunctionListener(this.workspace, 'translate', this.onWorkspaceMetricsChange);
         addFunctionListener(this.workspace, 'zoom', this.onWorkspaceMetricsChange);
         this.workspace.getToolbox().selectItemByPosition(0);
+        // B3: the block palette can be dragged wider (scratch-blocks fixes it at 250 px)
+        this.detachFlyoutResizer = attachFlyoutResizer(this.workspace);
 
         this.attachVM();
         // Only update blocks/vm locale when visible to avoid sizing issues
@@ -242,6 +245,7 @@ class Blocks extends React.Component {
     }
     componentWillUnmount () {
         this.detachVM();
+        if (this.detachFlyoutResizer) this.detachFlyoutResizer();
         // Hide any open field editor and move Blockly focus to the workspace
         // root before disposing. Without this, BlockSvg.dispose() detects the
         // focused element is inside a block and schedules a stale

@@ -254,3 +254,27 @@ test('saving twice quickly keeps one project on the robot', async ({page}) => {
     expect(saved).toHaveLength(1);
     await page.request.delete(`/api/projects/${saved[0].id}`);
 });
+
+const flyoutWidth = async page => {
+    const box = await page.locator('.blocklyFlyout').first()
+        .boundingBox();
+    return Math.round(box.width);
+};
+
+test('the block palette can be dragged wider and keeps its width', async ({page}) => {
+    await login(page);
+    const separator = page.getByRole('separator', {name: 'Resize block palette'});
+    const before = await flyoutWidth(page);
+    expect(before).toBeGreaterThan(340); // wide enough for the widest Motors block
+    const box = await separator.boundingBox();
+    await page.mouse.move(box.x + (box.width / 2), box.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(box.x + (box.width / 2) + 100, box.y + 200, {steps: 5});
+    await page.mouse.up();
+    await expect.poll(() => flyoutWidth(page)).toBe(before + 100);
+    await page.reload();
+    await page.waitForFunction(() => window.b3vm && window.b3vm.runtime.b3workspace);
+    await expect.poll(() => flyoutWidth(page)).toBe(before + 100);
+    await page.getByRole('separator', {name: 'Resize block palette'}).dblclick();
+    await expect.poll(() => flyoutWidth(page)).toBe(before);
+});
