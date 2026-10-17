@@ -6,6 +6,7 @@ from typing import Awaitable, Callable
 
 from .backend import HatBackend
 from .devices import PORTS, lookup
+from .errors import B3Error
 
 log = logging.getLogger(__name__)
 
@@ -21,7 +22,8 @@ def _describe(typeid: int | None) -> dict:
 
 class TelemetryLoop:
     def __init__(self, backend: HatBackend, broadcast: Callable[[dict], Awaitable[None]],
-                 interval: float = 0.05, vin_every: int = 20):
+                 interval: float = 0.05, vin_every: int = 20,
+                 on_fatal: Callable[[B3Error], Awaitable[None]] | None = None):
         self.backend = backend
         self.broadcast = broadcast
         self.interval = interval
@@ -29,12 +31,24 @@ class TelemetryLoop:
         self._known: dict[str, int | None] = {p: None for p in PORTS}
         self._steps = 0
         self._vin: float | None = None
+        self.on_fatal = on_fatal
+        self._fatal = False
 
     async def step(self) -> None:
+        if self._fatal:
+            return
         try:
             values = await self.backend.read()
             if self._steps % self.vin_every == 0:
                 self._vin = await self.backend.vin()
+        except B3Error as e:
+            if e.code != "hat_not_responding":
+                log.exception("telemetry read failed")
+                return
+            self._fatal = True
+            if self.on_fatal is not None:
+                await self.on_fatal(e)
+            return
         except Exception:
             log.exception("telemetry read failed")
             return

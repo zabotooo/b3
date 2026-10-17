@@ -57,6 +57,9 @@ def _read_all(dev, kind: Kind) -> dict:
 # How long read() waits for this step's port reads; slower ones finish in the background
 READ_WAIT = 0.03
 
+# A healthy read answers within ~50 ms; one older than this means the HAT went silent
+HAT_TIMEOUT = 3.0
+
 _DIRECTIONS = {"shortest": "shortest", "cw": "clockwise", "ccw": "anticlockwise"}
 
 
@@ -131,6 +134,7 @@ class BuildHatBackend(HatBackend):
         self._reading: dict[str, asyncio.Future] = {}
         # all blocking buildhat calls; aiohttp's default pool stays free for files and logins
         self._hw_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="b3-hw")
+        self._read_started: dict[str, float] = {}
         self._generation: dict[str, int] = {p: 0 for p in PORTS}
         self._stops: dict[str, set[asyncio.Event]] = {p: set() for p in PORTS}
         self._inflight: dict[str, asyncio.Future] = {}
@@ -305,6 +309,9 @@ class BuildHatBackend(HatBackend):
     async def read(self) -> dict[str, dict]:
         await self._refresh()
         loop = asyncio.get_running_loop()
+        for p, fut in list(self._reading.items()):
+            if not fut.done() and loop.time() - self._read_started.get(p, loop.time()) > HAT_TIMEOUT:
+                self._unresponsive()
         started = []
         for p, dev in list(self._devices.items()):
             readers = _READERS[self._kinds[p]]
@@ -316,6 +323,7 @@ class BuildHatBackend(HatBackend):
             fut = loop.run_in_executor(self._read_pool, reader, dev)
             fut.add_done_callback(partial(self._store, p, dev))
             self._reading[p] = fut
+            self._read_started[p] = loop.time()
             started.append(fut)
         if started:
             await asyncio.wait(started, timeout=READ_WAIT)
@@ -332,7 +340,26 @@ class BuildHatBackend(HatBackend):
             self._values[port].update(fut.result())
 
     async def vin(self) -> float:
-        return await self._run(self._hat.get_vin)
+        try:
+            return await asyncio.wait_for(self._run(self._hat.get_vin), HAT_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._unresponsive()
+
+    def _unresponsive(self) -> None:
+        """The HAT stopped answering: wake every thread waiting on it, then give up."""
+        log.error("Build HAT not responding")
+        error = RuntimeError("Build HAT not responding")
+        for p in PORTS:
+            self._fail_port_waiters(p, error)
+        hat = self._buildhat.devices.Device._instance
+        pending = list(hat.vinftr)
+        hat.vinftr.clear()
+        for ftr in pending:
+            try:
+                ftr.set_exception(error)
+            except InvalidStateError:
+                pass
+        raise B3Error("hat_not_responding", "Build HAT is not responding. B3 restarts it; reconnect in a moment.")
 
     async def motor_run_for_degrees(self, port, degrees, speed):
         self._require(port)

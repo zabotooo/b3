@@ -32,11 +32,21 @@ class FakeInstance:
 
 class FakeHat:
     types = {"A": 48, "B": -1, "C": -1, "D": -1}
+    vin_hangs = False
+    vin_released = False
 
     def get(self):
         return {p: {"typeid": t} for p, t in self.types.items()}
 
     def get_vin(self):
+        if FakeHat.vin_hangs:
+            ftr = Future()
+            FakeMotor.instance.vinftr.append(ftr)
+            try:
+                ftr.result(timeout=10)
+            except Exception:
+                FakeHat.vin_released = True
+                raise
         return 8.0
 
 
@@ -207,6 +217,8 @@ def fake_buildhat(monkeypatch):
         devices=types.SimpleNamespace(Device=types.SimpleNamespace(_instance=instance)))
     monkeypatch.setitem(sys.modules, "buildhat", module)
     monkeypatch.setattr(FakeHat, "types", {"A": 48, "B": -1, "C": -1, "D": -1})
+    monkeypatch.setattr(FakeHat, "vin_hangs", False)
+    monkeypatch.setattr(FakeHat, "vin_released", False)
     FakeMotor.failures = 0
     FakeMotor.instance = instance
     FakeMotor.blocked = 0
@@ -460,3 +472,41 @@ async def test_buildhat_calls_leave_the_default_pool_free(hat):
     await hat.motor_start("A", 20)
     await hat.motor_stop("A")
     await hat.stop_all()
+
+
+async def test_unresponsive_hat_frees_threads_and_reports(fake_buildhat, monkeypatch):
+    monkeypatch.setattr("b3hatd.buildhat_backend.HAT_TIMEOUT", 0.3)
+    monkeypatch.setattr(fake_buildhat, "ColorDistanceSensor", FakeHangingColorDistance)
+    monkeypatch.setattr(FakeHangingColorDistance, "used", set())
+    monkeypatch.setattr(FakeHat, "types", {"A": 37, "B": -1, "C": -1, "D": -1})
+    backend = BuildHatBackend()
+    await backend.start()
+    FakeHangingColorDistance.hang = True
+    FakeHat.vin_hangs = True
+    try:
+        with pytest.raises(B3Error) as e:
+            for _ in range(40):  # telemetry steps until the stuck read is older than HAT_TIMEOUT
+                await backend.read()
+                await asyncio.sleep(0.05)
+        assert e.value.code == "hat_not_responding"
+        with pytest.raises(B3Error) as e:
+            await backend.vin()
+        assert e.value.code == "hat_not_responding"
+        await asyncio.sleep(0.1)
+        assert FakeHat.vin_released, "the thread stuck in get_vin was woken"
+        assert fake_buildhat.devices.Device._instance.portftr[0] == []
+    finally:
+        FakeHangingColorDistance.hang = False
+        await backend.close()
+
+
+async def test_long_movement_is_not_a_hang(hat, monkeypatch):
+    monkeypatch.setattr("b3hatd.buildhat_backend.HAT_TIMEOUT", 0.3)
+    task = asyncio.create_task(hat.motor_run_for_degrees("A", 3600, 10))  # 36 s in the fake
+    for _ in range(12):
+        await hat.read()
+        await asyncio.sleep(0.05)
+    assert not task.done()
+    await hat.motor_stop("A")
+    with pytest.raises(B3Error):
+        await task

@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import os
+import signal
 
 from aiohttp import web
 
@@ -12,7 +14,7 @@ from .clients import Clients
 from .config import Config
 from .control import ControlManager
 from .errors import B3Error
-from .keys import BACKEND, CLIENTS, CONFIG, CONTROL, SESSIONS, SOUND, TASKS
+from .keys import BACKEND, CLIENTS, CONFIG, CONTROL, EXIT_CODE, SESSIONS, SOUND, TASKS
 from .telemetry import TelemetryLoop
 
 log = logging.getLogger(__name__)
@@ -41,6 +43,16 @@ async def _stop_everything(app: web.Application) -> None:
         await app[SOUND].stop()
 
 
+async def fatal(app: web.Application, error: B3Error) -> None:
+    """The hardware is gone: tell the editors, then stop so systemd restarts hatd."""
+    if app[EXIT_CODE]["code"]:
+        return
+    log.error("stopping: %s", error.message)
+    app[EXIT_CODE]["code"] = 75
+    await app[CLIENTS].broadcast({"type": "error", "error": error.to_dict()})
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 async def _notify_control(app: web.Application, holder: str | None) -> None:
     clients = app[CLIENTS]
     for cid in clients.ids():
@@ -50,7 +62,8 @@ async def _notify_control(app: web.Application, holder: str | None) -> None:
 async def _on_startup(app: web.Application) -> None:
     await app[BACKEND].start()
     config = app[CONFIG]
-    telemetry = TelemetryLoop(app[BACKEND], app[CLIENTS].broadcast, interval=config.telemetry_interval)
+    telemetry = TelemetryLoop(app[BACKEND], app[CLIENTS].broadcast, interval=config.telemetry_interval,
+                              on_fatal=lambda e: fatal(app, e))
     app[TASKS] = [
         asyncio.ensure_future(app[CONTROL].run(config.control_timeout / 6)),
         asyncio.ensure_future(telemetry.run()),
@@ -80,6 +93,7 @@ def create_app(config: Config, backend: HatBackend, sound) -> web.Application:
     app[SOUND] = sound
     app[SESSIONS] = auth.Sessions()
     app[CLIENTS] = Clients()
+    app[EXIT_CODE] = {"code": 0}  # set by fatal(); the app is frozen once running
     pending: set[asyncio.Task] = set()
 
     def on_change(holder: str | None) -> None:
