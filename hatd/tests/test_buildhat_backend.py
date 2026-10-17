@@ -55,6 +55,7 @@ class FakeMotor:
     instance: FakeInstance = None
     blocked = 0
     gets = 0
+    lag = 0  # reads after a move that still report the old position (the motor is still moving)
     lock = threading.Lock()
 
     def __init__(self, port):
@@ -65,6 +66,11 @@ class FakeMotor:
         self.speed = 0
         self.epoch = 0
         self.log = []
+        self.release = True  # buildhat: coast 0.2 s after a movement
+        self.release_seen = None
+        self.apos = 0
+        self._target = None
+        self._lag = 0
 
     # firmware simulation ------------------------------------------------
     def _move(self, lists, seconds):
@@ -86,8 +92,11 @@ class FakeMotor:
                 ftr.result(timeout=5)  # real buildhat waits forever; bounded so tests end
             except TimeoutError:
                 return
-            time.sleep(0.1)  # buildhat: time.sleep(0.2); self.coast()
-            self.coast()
+            if self.release:
+                time.sleep(0.1)  # buildhat: time.sleep(0.2); self.coast()
+                self.coast()
+            else:
+                self.speed = 0  # holding at the target
         finally:
             with FakeMotor.lock:
                 FakeMotor.blocked -= 1
@@ -107,6 +116,8 @@ class FakeMotor:
         if degrees < -180 or degrees > 180:
             raise RuntimeError("Invalid angle")
         self.log.append(("run_to_position", degrees, speed, direction))
+        self.release_seen = self.release
+        self._target, self._lag = degrees, FakeMotor.lag
         self._move(FakeMotor.instance.rampftr, 0.05)
 
     def start(self, speed=None):
@@ -124,7 +135,12 @@ class FakeMotor:
 
     def get(self):
         FakeMotor.gets += 1
-        return [self.speed, 0, 0]
+        if self._target is not None:
+            if self._lag > 0:
+                self._lag -= 1
+            else:
+                self.apos, self._target = self._target, None
+        return [self.speed, 0, self.apos]
 
     def get_position(self):
         raise AssertionError("each getter waits for a data frame; read all with get()")
@@ -222,6 +238,7 @@ def fake_buildhat(monkeypatch):
     FakeMotor.failures = 0
     FakeMotor.instance = instance
     FakeMotor.blocked = 0
+    monkeypatch.setattr(FakeMotor, "lag", 0)
     return module
 
 
@@ -612,4 +629,37 @@ async def test_no_new_buildhat_calls_after_the_hat_went_silent(hat):
     with pytest.raises(B3Error) as e:
         await hat.motor_start("A", 20)
     assert e.value.code == "hat_not_responding"
+
+
+async def test_go_to_holds_until_the_motor_stands_on_target_then_releases(hat, monkeypatch):
+    # buildhat releases the motor 0.2 s after its ramp; a fast move then coasts up to 30 degrees past
+    monkeypatch.setattr(FakeMotor, "lag", 5)
+    await asyncio.wait_for(hat.motor_go_to("A", 270, "shortest", 75), 3)
+    dev = hat._devices["A"]
+    assert dev.release_seen is False, "held through the end of the ramp"
+    assert dev.apos == -90 and dev._lag == 0, "waited until the motor reported the target"
+    assert dev.release is True
+    assert dev.log[-1] == ("coast",), "free to turn by hand afterwards"
+
+
+async def test_go_to_gives_up_holding_after_the_settle_limit(hat, monkeypatch):
+    monkeypatch.setattr(FakeMotor, "lag", 10 ** 6)  # never reaches the target
+    monkeypatch.setattr("b3hatd.buildhat_backend.SETTLE_LIMIT", 0.3)
+    await asyncio.wait_for(hat.motor_go_to("A", 90, "shortest", 75), 2)
+    assert hat._devices["A"].log[-1] == ("coast",)
+
+
+async def test_stop_while_settling_ends_at_once(hat, monkeypatch):
+    monkeypatch.setattr(FakeMotor, "lag", 10 ** 6)
+    task = asyncio.create_task(hat.motor_go_to("A", 90, "shortest", 75))
+    await asyncio.sleep(0.3)  # the ramp takes 0.05 s; now it is holding and waiting
+    await hat.motor_stop("A")
+    with pytest.raises(B3Error) as e:
+        await asyncio.wait_for(task, 1)
+    assert e.value.code == "interrupted"
+    for _ in range(10):
+        if hat._inflight["A"].done():
+            break
+        await asyncio.sleep(0.05)
+    assert hat._inflight["A"].done(), "the holding thread noticed the stop"
 

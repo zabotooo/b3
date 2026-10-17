@@ -159,7 +159,7 @@ async def test_go_to_spike_position_270(hat):
     await asyncio.sleep(0.3)
     apos = (await hat.read())[ANGULAR]["aposition"]
     print(f"go_to 270 -> aposition {apos}")
-    assert abs(((apos + 90 + 180) % 360) - 180) <= 15
+    assert abs(((apos + 90 + 180) % 360) - 180) <= 5  # held until it stands there (was ±31 before)
 
 
 async def test_color_distance_sensor_values(hat):
