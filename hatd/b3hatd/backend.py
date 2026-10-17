@@ -10,6 +10,12 @@ class HatBackend(ABC):
     B3Error("interrupted") if motor_stop/stop_all stopped them first.
     """
 
+    program_running = False
+
+    def set_program_running(self, running: bool) -> None:
+        """Whether an editor program runs; backends may read sensors less while idle."""
+        self.program_running = running
+
     @abstractmethod
     async def start(self) -> None: ...
 

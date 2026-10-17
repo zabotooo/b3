@@ -70,7 +70,7 @@ const B3BarComponent = props => {
             {connected ? (
                 <div className={styles.ports}>
                     {['A', 'B', 'C', 'D'].map(port => {
-                        const {title, value} = describePort(port, props.ports[port]);
+                        const {title, value} = describePort(port, props.ports[port], !props.running);
                         return (
                             <div
                                 className={styles.port}
@@ -116,6 +116,7 @@ B3BarComponent.propTypes = {
     onTakeControl: PropTypes.func.isRequired,
     pinError: PropTypes.string,
     ports: PropTypes.object, // eslint-disable-line react/forbid-prop-types
+    running: PropTypes.bool,
     state: PropTypes.string.isRequired,
     vin: PropTypes.number
 };

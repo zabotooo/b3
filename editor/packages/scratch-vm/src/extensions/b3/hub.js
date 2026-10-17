@@ -63,9 +63,13 @@ class B3Hub extends EventEmitter {
         runtime.on('PROJECT_START', () => {
             this.running = true;
             this.resetProgramState();
+            this.emit('running', true);
+            // hatd reads every sensor mode only while a program runs (idle: no flashing LED)
+            if (this.isController) this.request('program.running', {running: true}).catch(() => {});
         });
         runtime.on('PROJECT_STOP_ALL', () => {
             this.running = false;
+            this.emit('running', false);
             if (this.isController) this.request('stop_all').catch(() => {});
         });
     }
@@ -172,6 +176,12 @@ class B3Hub extends EventEmitter {
             break;
         case 'device':
             this.emit('device', msg);
+            break;
+        case 'error':
+            if (msg.error && msg.error.code === 'hat_not_responding') {
+                this.runtime.stopAll();
+                this.emit('blockError', {message: msg.error.message, port: null, blockId: null});
+            }
             break;
         case 'control': {
             const hadControl = this.isController;

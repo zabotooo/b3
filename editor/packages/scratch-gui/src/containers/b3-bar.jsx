@@ -7,7 +7,8 @@ const snapshot = hub => ({
     isController: hub.isController,
     hasController: hub.holder !== null,
     ports: hub.ports,
-    vin: hub.vin
+    vin: hub.vin,
+    running: hub.running
 });
 
 class B3Bar extends React.Component {
@@ -37,13 +38,13 @@ class B3Bar extends React.Component {
     }
 
     componentDidMount () {
-        for (const name of ['state', 'telemetry', 'control']) this.hub.on(name, this.refresh);
+        for (const name of ['state', 'telemetry', 'control', 'running']) this.hub.on(name, this.refresh);
         this.hub.on('blockError', this.onBlockError);
         this.hub.start();
     }
 
     componentWillUnmount () {
-        for (const name of ['state', 'telemetry', 'control']) this.hub.removeListener(name, this.refresh);
+        for (const name of ['state', 'telemetry', 'control', 'running']) this.hub.removeListener(name, this.refresh);
         this.hub.removeListener('blockError', this.onBlockError);
     }
 

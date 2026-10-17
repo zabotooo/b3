@@ -276,3 +276,26 @@ test('hello with the same major API version and a minor suffix connects', async 
     t.equal(hub.state, 'connected');
     t.equal(hub.serverVersion, null);
 });
+
+test('program start tells hatd a program runs, only when in control', async t => {
+    const {runtime} = await connected('me');
+    runtime.emit('PROJECT_START');
+    const sent = FakeWebSocket.last.lastRequest();
+    t.equal(sent.cmd, 'program.running');
+    t.same(sent.args, {running: true});
+    const other = await connected('someone');
+    other.runtime.emit('PROJECT_START');
+    t.notOk(FakeWebSocket.last.sent.some(m => m.cmd === 'program.running'));
+});
+
+test('hatd reporting a silent Build HAT stops the program and says so', async t => {
+    const {hub, runtime} = await connected('me');
+    const errors = [];
+    hub.on('blockError', e => errors.push(e.message));
+    FakeWebSocket.last.receive({
+        type: 'error',
+        error: {code: 'hat_not_responding', message: 'Build HAT is not responding.'}
+    });
+    t.equal(runtime.stopped, 1);
+    t.same(errors, ['Build HAT is not responding.']);
+});

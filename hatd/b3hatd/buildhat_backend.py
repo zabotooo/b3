@@ -47,9 +47,9 @@ _READERS: dict[Kind, list] = {
 }
 
 
-def _read_all(dev, kind: Kind) -> dict:
+def _read_all(dev, readers: list) -> dict:
     values = {}
-    for reader in _READERS[kind]:
+    for reader in readers:
         values.update(reader(dev))
     return values
 
@@ -154,6 +154,8 @@ class BuildHatBackend(HatBackend):
         # all blocking buildhat calls; aiohttp's default pool stays free for files and logins
         self._hw_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="b3-hw")
         self._read_started: dict[str, float] = {}
+        self._active = False  # a program runs: read every mode of multi-mode sensors
+        self._fill: set[str] = set()  # ports to read in every mode at once (program just started)
         self._generation: dict[str, int] = {p: 0 for p in PORTS}
         self._stops: dict[str, set[asyncio.Event]] = {p: set() for p in PORTS}
         self._inflight: dict[str, asyncio.Future] = {}
@@ -214,7 +216,7 @@ class BuildHatBackend(HatBackend):
                     continue
                 try:
                     dev = await self._run(self._open, p, dev_info.kind)
-                    self._values[p] = await self._run(_read_all, dev, dev_info.kind)
+                    self._values[p] = await self._run(_read_all, dev, self._readers(dev_info.kind))
                     self._devices[p] = dev
                     self._kinds[p] = dev_info.kind
                     self._commanded[p] = dict(_COMMANDED_DEFAULTS.get(dev_info.kind, {}))
@@ -328,7 +330,18 @@ class BuildHatBackend(HatBackend):
             stopped.cancel()
             self._stops[port].discard(stop)
 
+    def _readers(self, kind: Kind) -> list:
+        # idle: one mode only, so a sensor's LED (Color & Distance) does not flash
+        return _READERS[kind] if self._active else _READERS[kind][:1]
+
     # --- HatBackend -------------------------------------------------------
+    def set_program_running(self, running: bool) -> None:
+        if running and not self._active:
+            # the idle modes' values are old: refresh every mode in the next read
+            self._fill = {p for p, kind in self._kinds.items() if len(_READERS[kind]) > 1}
+        self._active = running
+        self.program_running = running
+
     def typeids(self) -> dict[str, int | None]:
         return dict(self._types)
 
@@ -340,12 +353,16 @@ class BuildHatBackend(HatBackend):
                 self._unresponsive()
         started = []
         for p, dev in list(self._devices.items()):
-            readers = _READERS[self._kinds[p]]
+            readers = self._readers(self._kinds[p])
             busy = p in self._reading and not self._reading[p].done()
             if not readers or busy:  # a slow sensor read is still running: keep its last values
                 continue
-            reader = readers[self._turn[p] % len(readers)]
-            self._turn[p] += 1
+            if p in self._fill:
+                self._fill.discard(p)
+                reader = partial(_read_all, readers=_READERS[self._kinds[p]])
+            else:
+                reader = readers[self._turn[p] % len(readers)]
+                self._turn[p] += 1
             fut = loop.run_in_executor(self._read_pool, reader, dev)
             fut.add_done_callback(partial(self._store, p, dev))
             self._reading[p] = fut
@@ -463,6 +480,7 @@ class BuildHatBackend(HatBackend):
     async def stop_all(self):
         # Interrupt every port before the first await: a command sent right after
         # stop_all (Run does that) must not be halted when stop_all reaches its port.
+        self.set_program_running(False)
         gens = {}
         for p in PORTS:
             self._interrupt(p)

@@ -267,6 +267,14 @@ async def _sound_volume(ctx: Context, args: dict):
 
 # --- everything -------------------------------------------------------------
 
+@command("program.running")
+async def _program_running(ctx: Context, args: dict):
+    running = args.get("running")
+    if not isinstance(running, bool):
+        raise B3Error("bad_args", "running must be true or false")
+    ctx.backend.set_program_running(running)
+
+
 @command("stop_all")
 async def _stop_all(ctx: Context, args: dict):
     await ctx.backend.stop_all()

@@ -406,7 +406,9 @@ async def test_multi_mode_sensor_reads_one_value_per_step(fake_buildhat, monkeyp
     backend = BuildHatBackend()
     await backend.start()
     sensor = backend._devices["A"]
-    assert sorted(sensor.calls) == ["color", "distance", "reflection"]  # filled once on attach
+    assert sensor.calls == ["color"]  # filled once on attach, idle: first mode only
+    backend.set_program_running(True)
+    await backend.read()  # program start: every mode at once
     sensor.calls.clear()
     for _ in range(3):
         values = await backend.read()
@@ -419,6 +421,7 @@ async def test_slow_sensor_does_not_hold_up_telemetry(fake_buildhat, monkeypatch
     monkeypatch.setattr(FakeColorDistance, "reflection", 40)
     backend = BuildHatBackend()
     await backend.start()
+    backend.set_program_running(True)
     monkeypatch.setattr(FakeColorDistance, "delay", 0.3)
     monkeypatch.setattr(FakeColorDistance, "reflection", 77)
     slowest = 0.0
@@ -541,3 +544,42 @@ async def test_other_start_errors_are_not_retried(fake_buildhat, monkeypatch):
     with pytest.raises(RuntimeError, match="no serial port"):
         await backend.start()
     assert resets == []
+
+
+async def test_idle_sensor_stays_in_its_first_mode(fake_buildhat, monkeypatch):
+    # the Color & Distance LED changes with the mode; cycling makes it flash
+    monkeypatch.setattr(FakeHat, "types", {"A": 37, "B": -1, "C": -1, "D": -1})
+    backend = BuildHatBackend()
+    await backend.start()
+    sensor = backend._devices["A"]
+    sensor.calls.clear()
+    for _ in range(4):
+        values = await backend.read()
+    assert set(sensor.calls) == {"color"}
+    assert values["A"] == {"color": "red"}
+    backend.set_program_running(True)
+    for _ in range(3):
+        values = await backend.read()
+    assert sorted(set(sensor.calls)) == ["color", "distance", "reflection"]
+    assert values["A"] == {"color": "red", "reflection": 40, "distance": 5}
+    backend.set_program_running(False)
+    sensor.calls.clear()
+    for _ in range(3):
+        values = await backend.read()
+    assert set(sensor.calls) == {"color"}
+    assert values["A"] == {"color": "red", "reflection": 40, "distance": 5}, "last values kept for blocks"
+    await backend.close()
+
+
+async def test_stop_all_then_running_ends_active(fake_buildhat, monkeypatch):
+    # Run sends stop_all and then program.running; hatd handles them as concurrent tasks
+    monkeypatch.setattr(FakeHat, "types", {"A": 37, "B": -1, "C": -1, "D": -1})
+    backend = BuildHatBackend()
+    await backend.start()
+    backend.set_program_running(True)
+    stop = asyncio.ensure_future(backend.stop_all())
+    await asyncio.sleep(0)
+    backend.set_program_running(True)
+    await stop
+    assert backend._active
+    await backend.close()
