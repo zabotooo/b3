@@ -99,3 +99,26 @@
     min-width: auto;
     min-height: auto;
 }
+
+/* B3: separator between the block palette and the workspace (b3-flyout-resizer.js) */
+.blocks :global(.b3FlyoutResizer) {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 0.5rem;
+    margin-left: -0.25rem;
+    cursor: col-resize;
+    touch-action: none;
+    z-index: 50;
+}
+
+.blocks :global(.b3FlyoutResizer:hover),
+.blocks :global(.b3FlyoutResizer:focus-visible) {
+    background-color: $looks-transparent;
+    outline: none;
+}
+
+:global(body.b3FlyoutResizing) {
+    cursor: col-resize;
+    user-select: none;
+}
