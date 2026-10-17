@@ -138,3 +138,33 @@ passed; a healthy hatd exits within 1 s of SIGTERM. Log clean throughout.
 | `systemctl restart b3` with 2–4 editor connections open | 0.24 s |
 | `systemctl kill -s KILL b3` | systemd restarted it (NRestarts=1) |
 | Update (installer run again) | same PIN printed, both saved projects kept, no `/opt/b3.old` left |
+
+## Build HAT recovery (2026-10-17)
+
+What happened on the installed service (evidence for plan 3b):
+
+1. **Firmware stopped answering.** At 19:37 the HAT firmware stopped answering while a program ran. A
+   `faulthandler` dump (via gdb) showed seven threads in
+   `Motor.run_for_degrees → get_position → Device.get → Future.result()`, plus telemetry reads and
+   `get_vin`, all waiting forever. buildhat waits on these futures with no timeout. The default thread
+   pool was exhausted, so even `GET /` hung.
+2. **No recovery on restart.** Every restart failed with `BuildHATError("HAT not found")`, because buildhat
+   resets the HAT only on a firmware version mismatch. A GPIO reset (`hat_reset.py`: BOOT0 low, RESET
+   pulse) brought it back.
+3. **A sensor blip killed its port until restart.** The Color & Distance sensor re-enumerated once, and
+   port A then stayed "Port already used" until a restart. A read thread stuck in `Device.get()` held the
+   old device object, and buildhat frees a port only in `Device.__del__`.
+4. **The sensor LED flashed.** hatd cycled the Color & Distance sensor through color, reflection and
+   distance about 7 times a second, so its LED flashed.
+
+After plan 3b, with B3 0.1.0 and the service updated through `install.sh`:
+
+| Check | Result |
+|---|---|
+| Hardware suite (`B3_HW_MOTOR=B B3_HW_ANGULAR=C B3_HW_CDS=A`) | 12 passed, 1 skipped (`test_color_distance_sensor_values` sets program running first) |
+| Idle sensor | Color & Distance LED steady while no program runs; cycles during a program; steady again after Stop |
+| Sensor unplugged for 2 s on port A | port shown empty, then the sensor again within seconds; motors unaffected |
+| HAT reset into its bootloader while the service runs | watchdog after 4.4 s ("Build HAT not responding"), editors told, exit 75; systemd restart at 6.2 s; firmware loaded and editor reachable at 22.7 s; all four devices back, vin 7.79 V |
+
+Note: port C (Large Angular) once was not detected until its cable was reseated; this was a loose plug,
+not software.

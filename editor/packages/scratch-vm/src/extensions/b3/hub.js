@@ -59,13 +59,28 @@ class B3Hub extends EventEmitter {
         this._ping = null;
         this._silence = null;
         this.running = false; // between Run and Stop; B3 sensor hats only fire then
+        this._threads = false; // any script runs (a clicked one too)
+        this._sentActive = false; // what hatd was last told by program.running
         this.resetProgramState();
         runtime.on('PROJECT_START', () => {
             this.running = true;
             this.resetProgramState();
+            this.emit('running', true);
+            this._syncActive();
+        });
+        // a clicked script runs without PROJECT_START; it counts while its threads run
+        runtime.on('PROJECT_RUN_START', () => {
+            this._threads = true;
+            this._syncActive();
+        });
+        runtime.on('PROJECT_RUN_STOP', () => {
+            this._threads = false;
+            this._syncActive();
         });
         runtime.on('PROJECT_STOP_ALL', () => {
             this.running = false;
+            this._sentActive = false; // stop_all below puts hatd's sensors back to idle
+            this.emit('running', false);
             if (this.isController) this.request('stop_all').catch(() => {});
         });
     }
@@ -173,11 +188,21 @@ class B3Hub extends EventEmitter {
         case 'device':
             this.emit('device', msg);
             break;
+        case 'error':
+            if (msg.error && msg.error.code === 'hat_not_responding') {
+                this.runtime.stopAll();
+                this.emit('blockError', {message: msg.error.message, port: null, blockId: null});
+            }
+            break;
         case 'control': {
             const hadControl = this.isController;
             this.holder = msg.holder;
             this._updatePing();
             this.emit('control', msg.holder);
+            if (!hadControl && this.isController) {
+                this._sentActive = false; // taking control stopped the robot, hatd is idle
+                this._syncActive();
+            }
             if (hadControl && !this.isController) {
                 this.runtime.stopAll();
                 this.emit('blockError', {
@@ -273,6 +298,14 @@ class B3Hub extends EventEmitter {
 
     forgetSound (md5) {
         this._sounds.delete(md5);
+    }
+
+    // hatd reads every sensor mode only while a program runs (idle: no flashing LED)
+    _syncActive () {
+        const active = this.running || this._threads;
+        if (!this.isController || active === this._sentActive) return;
+        this._sentActive = active;
+        this.request('program.running', {running: active}).catch(() => {});
     }
 
     _updatePing () {

@@ -165,6 +165,7 @@ async def test_go_to_spike_position_270(hat):
 async def test_color_distance_sensor_values(hat):
     if not CDS:
         pytest.skip("set B3_HW_CDS")
+    hat.set_program_running(True)  # idle reads only the color mode
     for _ in range(40):
         if hat.typeids()[CDS] is not None:
             break
@@ -173,4 +174,9 @@ async def test_color_distance_sensor_values(hat):
     t0 = time.monotonic()
     values = (await hat.read())[CDS]
     print(f"C&D values {values}, read() with all ports {1000 * (time.monotonic() - t0):.1f} ms")
+    for _ in range(20):  # the first read after program start fetches every mode in the background
+        if set(values) == {"color", "reflection", "distance"}:
+            break
+        await asyncio.sleep(0.05)
+        values = (await hat.read())[CDS]
     assert set(values) == {"color", "reflection", "distance"}

@@ -26,6 +26,14 @@ describe('describePort', () => {
             .toEqual({title: 'C · Force Sensor', value: '2.3 N'});
         expect(describePort('D', {kind: 'color', name: 'Color Sensor', color: 'none', reflection: 0}))
             .toEqual({title: 'D · Color Sensor', value: 'no color · 0%'});
+        expect(describePort('A', {kind: 'color_distance', name: 'Color & Distance Sensor', color: 'red'}))
+            .toEqual({title: 'A · Color & Distance Sensor', value: 'red'});
+    });
+    test('idle color sensors show only the color hatd keeps reading', () => {
+        const cd = {kind: 'color_distance', name: 'Color & Distance Sensor', color: 'red', reflection: 4, distance: 5};
+        expect(describePort('A', cd, true)).toEqual({title: 'A · Color & Distance Sensor', value: 'red'});
+        expect(describePort('D', {kind: 'color', name: 'Color Sensor', color: 'none', reflection: 0}, true))
+            .toEqual({title: 'D · Color Sensor', value: 'no color'});
     });
     test('unknown kind shows the name only', () => {
         expect(describePort('D', {kind: null, name: 'Unknown device 99'}))

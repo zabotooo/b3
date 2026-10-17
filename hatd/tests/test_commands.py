@@ -176,3 +176,14 @@ async def test_run_for_zero_returns_at_once(ctl, backend):
     reply = await call(ctl, "motor.run_for", {"port": "A", "unit": "degrees", "value": 0, "speed": 50})
     assert reply["ok"], reply
     assert not [c for c in backend.calls if c[0] == "run_for_degrees"]
+
+
+async def test_program_running_sets_backend_mode(authed, backend):
+    ws, _ = await open_ws(authed)
+    await call(ws, "control.claim", {})
+    reply = await call(ws, "program.running", {"running": True})
+    assert reply["ok"]
+    assert backend.program_running is True
+    reply = await call(ws, "program.running", {"running": "yes"})
+    assert reply["error"]["code"] == "bad_args"
+    await ws.close()

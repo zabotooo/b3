@@ -1,6 +1,7 @@
 """HatBackend on top of the blocking `buildhat` library."""
 
 import asyncio
+import gc
 import logging
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from functools import partial
@@ -46,15 +47,19 @@ _READERS: dict[Kind, list] = {
 }
 
 
-def _read_all(dev, kind: Kind) -> dict:
+def _read_all(dev, readers: list) -> dict:
     values = {}
-    for reader in _READERS[kind]:
+    for reader in readers:
         values.update(reader(dev))
     return values
 
 
 # How long read() waits for this step's port reads; slower ones finish in the background
 READ_WAIT = 0.03
+
+# A healthy read answers within ~50 ms; one older than this means the HAT went silent
+HAT_TIMEOUT = 3.0
+_SILENT_MESSAGE = "Build HAT is not responding. B3 restarts it; reconnect in a moment."
 
 _DIRECTIONS = {"shortest": "shortest", "cw": "clockwise", "ccw": "anticlockwise"}
 
@@ -64,6 +69,24 @@ _COMMANDED_DEFAULTS = {
     Kind.MOTOR_PASSIVE: {"power": 0},
     Kind.LIGHT: {"brightness": 0},
 }
+
+
+def reset_hat() -> None:
+    """Restart the HAT into its bootloader, as buildhat does before loading new firmware.
+    buildhat itself only resets on a firmware version mismatch, so a HAT whose firmware
+    hung answers nothing and Hat() reports "HAT not found"."""
+    import time
+    from gpiozero import DigitalOutputDevice  # Pi only
+    reset = DigitalOutputDevice(4)
+    boot0 = DigitalOutputDevice(22)
+    boot0.off()
+    reset.off()
+    time.sleep(0.01)
+    reset.on()
+    time.sleep(0.01)
+    boot0.close()
+    reset.close()
+    time.sleep(0.5)
 
 
 class _Waiters(list):
@@ -116,7 +139,8 @@ class BuildHatBackend(HatBackend):
     "generation"; anything that bumps the generation interrupts the older commands.
     """
 
-    def __init__(self):
+    def __init__(self, reset=reset_hat):
+        self._reset = reset
         self._buildhat = None
         self._hat = None
         self._types: dict[str, int | None] = {p: None for p in PORTS}
@@ -128,6 +152,12 @@ class BuildHatBackend(HatBackend):
         # one reader thread per port, separate from the pool that runs motor commands
         self._read_pool = ThreadPoolExecutor(max_workers=len(PORTS), thread_name_prefix="b3-read")
         self._reading: dict[str, asyncio.Future] = {}
+        # all blocking buildhat calls; aiohttp's default pool stays free for files and logins
+        self._hw_pool = ThreadPoolExecutor(max_workers=16, thread_name_prefix="b3-hw")
+        self._read_started: dict[str, float] = {}
+        self._active = False  # a program runs: read every mode of multi-mode sensors
+        self._silent = False  # the HAT stopped answering; hatd is about to restart
+        self._fill: set[str] = set()  # ports to read in every mode at once (program just started)
         self._generation: dict[str, int] = {p: 0 for p in PORTS}
         self._stops: dict[str, set[asyncio.Event]] = {p: set() for p in PORTS}
         self._inflight: dict[str, asyncio.Future] = {}
@@ -136,7 +166,14 @@ class BuildHatBackend(HatBackend):
     async def start(self) -> None:
         import buildhat  # Pi only
         self._buildhat = buildhat
-        self._hat = await asyncio.to_thread(buildhat.Hat)  # loads firmware on first run
+        try:
+            self._hat = await self._run(buildhat.Hat)  # loads firmware on first run
+        except Exception as e:
+            if "HAT not found" not in str(e):
+                raise
+            log.warning("Build HAT not answering; resetting it")
+            await self._run(self._reset)
+            self._hat = await self._run(buildhat.Hat)
         hat = buildhat.devices.Device._instance
         for lists in (hat.rampftr, hat.pulseftr):
             for i, pending in enumerate(lists):
@@ -150,6 +187,12 @@ class BuildHatBackend(HatBackend):
         self._devices.clear()
         self._kinds.clear()
         self._read_pool.shutdown(wait=False)
+        self._hw_pool.shutdown(wait=False)
+
+    async def _run(self, fn, *args, **kwargs):
+        if self._silent:  # no new thread may block on a HAT that stopped answering
+            raise B3Error("hat_not_responding", _SILENT_MESSAGE)
+        return await asyncio.get_running_loop().run_in_executor(self._hw_pool, partial(fn, *args, **kwargs))
 
     # --- ports ------------------------------------------------------------
     def _open(self, port: str, kind: Kind):
@@ -157,7 +200,7 @@ class BuildHatBackend(HatBackend):
 
     async def _refresh(self) -> None:
         async with self._lock:
-            info = await asyncio.to_thread(self._hat.get)
+            info = await self._run(self._hat.get)
             for p in PORTS:
                 typeid = info[p]["typeid"]
                 typeid = None if typeid == -1 else typeid
@@ -170,20 +213,32 @@ class BuildHatBackend(HatBackend):
                 self._values.pop(p, None)
                 self._interrupt(p)
                 self._release_waiters(p)
+                self._fail_port_waiters(p, RuntimeError(f"port {p}: device changed"))
+                self._reading.pop(p, None)
                 dev_info = lookup(typeid)
                 if dev_info is None:
                     continue
                 try:
-                    dev = await asyncio.to_thread(self._open, p, dev_info.kind)
-                    self._values[p] = await asyncio.to_thread(_read_all, dev, dev_info.kind)
+                    # opening and the first read wait on the firmware like any read: watch them too
+                    dev, values = await asyncio.wait_for(self._attach(p, dev_info.kind), HAT_TIMEOUT)
+                    self._values[p] = values
                     self._devices[p] = dev
                     self._kinds[p] = dev_info.kind
                     self._commanded[p] = dict(_COMMANDED_DEFAULTS.get(dev_info.kind, {}))
+                except asyncio.TimeoutError:
+                    self._unresponsive()
                 except Exception as e:
                     # e.g. "Port already used" while the old object is still referenced;
                     # report the port empty so the next refresh tries again
                     log.warning("cannot open %s on port %s: %s", dev_info.name, p, e)
                     self._types[p] = None
+                    # a woken thread's traceback keeps the old device in a reference cycle;
+                    # buildhat frees the port only in Device.__del__
+                    gc.collect()
+
+    async def _attach(self, port: str, kind: Kind):
+        dev = await self._run(self._open, port, kind)
+        return dev, await self._run(_read_all, dev, self._readers(kind))
 
     def _require(self, port: str):
         dev = self._devices.get(port)
@@ -198,7 +253,9 @@ class BuildHatBackend(HatBackend):
     async def _call(self, port: str, fn, *args, **kwargs):
         """Run a blocking buildhat call in a thread; library errors name the port."""
         try:
-            return await asyncio.to_thread(fn, *args, **kwargs)
+            return await self._run(fn, *args, **kwargs)
+        except B3Error:
+            raise
         except Exception as e:
             raise B3Error("hardware_error", f"Port {port}: {e}", port=port) from e
 
@@ -207,6 +264,21 @@ class BuildHatBackend(HatBackend):
         self._generation[port] += 1
         for ev in list(self._stops[port]):
             ev.set()
+
+    def _fail_port_waiters(self, port: str, error: Exception) -> None:
+        """Wake every thread waiting on this port's firmware replies with `error`.
+        buildhat waits on these futures without a timeout; a device that dropped off
+        (or a silent HAT) would hold such a thread, and the old device object, forever."""
+        hat = self._buildhat.devices.Device._instance
+        i = PORTS.index(port)
+        for lists in (hat.portftr, hat.rampftr, hat.pulseftr):
+            pending = list(lists[i])
+            lists[i].clear()
+            for ftr in pending:
+                try:
+                    ftr.set_exception(error)
+                except InvalidStateError:
+                    pass
 
     def _check(self, port: str, gen: int) -> None:
         if self._generation[port] != gen:
@@ -271,24 +343,43 @@ class BuildHatBackend(HatBackend):
             stopped.cancel()
             self._stops[port].discard(stop)
 
+    def _readers(self, kind: Kind) -> list:
+        # idle: one mode only, so a sensor's LED (Color & Distance) does not flash
+        return _READERS[kind] if self._active else _READERS[kind][:1]
+
     # --- HatBackend -------------------------------------------------------
+    def set_program_running(self, running: bool) -> None:
+        if running and not self._active:
+            # the idle modes' values are old: refresh every mode in the next read
+            self._fill = {p for p, kind in self._kinds.items() if len(_READERS[kind]) > 1}
+        self._active = running
+        self.program_running = running
+
     def typeids(self) -> dict[str, int | None]:
         return dict(self._types)
 
     async def read(self) -> dict[str, dict]:
         await self._refresh()
         loop = asyncio.get_running_loop()
+        for p, fut in list(self._reading.items()):
+            if not fut.done() and loop.time() - self._read_started.get(p, loop.time()) > HAT_TIMEOUT:
+                self._unresponsive()
         started = []
         for p, dev in list(self._devices.items()):
-            readers = _READERS[self._kinds[p]]
+            readers = self._readers(self._kinds[p])
             busy = p in self._reading and not self._reading[p].done()
             if not readers or busy:  # a slow sensor read is still running: keep its last values
                 continue
-            reader = readers[self._turn[p] % len(readers)]
-            self._turn[p] += 1
+            if p in self._fill:
+                self._fill.discard(p)
+                reader = partial(_read_all, readers=_READERS[self._kinds[p]])
+            else:
+                reader = readers[self._turn[p] % len(readers)]
+                self._turn[p] += 1
             fut = loop.run_in_executor(self._read_pool, reader, dev)
             fut.add_done_callback(partial(self._store, p, dev))
             self._reading[p] = fut
+            self._read_started[p] = loop.time()
             started.append(fut)
         if started:
             await asyncio.wait(started, timeout=READ_WAIT)
@@ -305,7 +396,27 @@ class BuildHatBackend(HatBackend):
             self._values[port].update(fut.result())
 
     async def vin(self) -> float:
-        return await asyncio.to_thread(self._hat.get_vin)
+        try:
+            return await asyncio.wait_for(self._run(self._hat.get_vin), HAT_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._unresponsive()
+
+    def _unresponsive(self) -> None:
+        """The HAT stopped answering: wake every thread waiting on it, then give up."""
+        log.error("Build HAT not responding")
+        self._silent = True
+        error = RuntimeError("Build HAT not responding")
+        for p in PORTS:
+            self._fail_port_waiters(p, error)
+        hat = self._buildhat.devices.Device._instance
+        pending = list(hat.vinftr)
+        hat.vinftr.clear()
+        for ftr in pending:
+            try:
+                ftr.set_exception(error)
+            except InvalidStateError:
+                pass
+        raise B3Error("hat_not_responding", _SILENT_MESSAGE)
 
     async def motor_run_for_degrees(self, port, degrees, speed):
         self._require(port)
@@ -383,6 +494,7 @@ class BuildHatBackend(HatBackend):
     async def stop_all(self):
         # Interrupt every port before the first await: a command sent right after
         # stop_all (Run does that) must not be halted when stop_all reaches its port.
+        self.set_program_running(False)
         gens = {}
         for p in PORTS:
             self._interrupt(p)

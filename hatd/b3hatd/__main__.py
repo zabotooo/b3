@@ -2,6 +2,7 @@
 
 import argparse
 import logging
+import os
 from pathlib import Path
 
 from aiohttp import web
@@ -9,6 +10,7 @@ from aiohttp import web
 from . import __version__
 from .app import create_app
 from .config import load_config
+from .keys import EXIT_CODE
 from .devices import PORTS
 from .sound import SoundPlayer
 
@@ -58,8 +60,12 @@ def main(argv: list[str] | None = None) -> None:
         parser.error(str(e))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     config = load_config(args.config)
-    web.run_app(build(args.config, args.sim, args.sim_devices), host=config.http_host, port=config.http_port,
-                shutdown_timeout=5)
+    app = build(args.config, args.sim, args.sim_devices)
+    web.run_app(app, host=config.http_host, port=config.http_port, shutdown_timeout=5)
+    if app[EXIT_CODE]["code"]:
+        # threads stuck on the silent HAT are not daemons; a normal exit would wait for them forever
+        logging.shutdown()
+        os._exit(app[EXIT_CODE]["code"])
 
 
 if __name__ == "__main__":

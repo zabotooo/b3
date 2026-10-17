@@ -276,3 +276,52 @@ test('hello with the same major API version and a minor suffix connects', async 
     t.equal(hub.state, 'connected');
     t.equal(hub.serverVersion, null);
 });
+
+test('program start tells hatd a program runs, only when in control', async t => {
+    const {runtime} = await connected('me');
+    runtime.emit('PROJECT_START');
+    const sent = FakeWebSocket.last.lastRequest();
+    t.equal(sent.cmd, 'program.running');
+    t.same(sent.args, {running: true});
+    const other = await connected('someone');
+    other.runtime.emit('PROJECT_START');
+    t.notOk(FakeWebSocket.last.sent.some(m => m.cmd === 'program.running'));
+});
+
+test('hatd reporting a silent Build HAT stops the program and says so', async t => {
+    const {hub, runtime} = await connected('me');
+    const errors = [];
+    hub.on('blockError', e => errors.push(e.message));
+    FakeWebSocket.last.receive({
+        type: 'error',
+        error: {code: 'hat_not_responding', message: 'Build HAT is not responding.'}
+    });
+    t.equal(runtime.stopped, 1);
+    t.same(errors, ['Build HAT is not responding.']);
+});
+
+const runningSent = ws => ws.sent.filter(m => m.cmd === 'program.running').map(m => m.args.running);
+
+test('a clicked script counts as a running program while its threads run', async t => {
+    const {runtime} = await connected('me');
+    runtime.emit('PROJECT_RUN_START');
+    runtime.emit('PROJECT_RUN_STOP');
+    t.same(runningSent(FakeWebSocket.last), [true, false]);
+});
+
+test('threads ending inside a Run keep the program running until Stop', async t => {
+    const {runtime} = await connected('me');
+    runtime.emit('PROJECT_START');
+    runtime.emit('PROJECT_RUN_START');
+    runtime.emit('PROJECT_RUN_STOP');
+    t.same(runningSent(FakeWebSocket.last), [true], 'hats stay armed until Stop');
+});
+
+test('taking control while a program runs tells hatd it runs', async t => {
+    const {hub, runtime} = await connected('someone');
+    runtime.emit('PROJECT_START');
+    t.same(runningSent(FakeWebSocket.last), [], 'not in control yet');
+    FakeWebSocket.last.receive({type: 'control', holder: 'me', you: true});
+    t.ok(hub.isController);
+    t.same(runningSent(FakeWebSocket.last), [true]);
+});

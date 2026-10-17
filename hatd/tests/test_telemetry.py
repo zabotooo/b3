@@ -125,3 +125,23 @@ async def test_rate_holds_when_reads_are_slow():
     await asyncio.sleep(1.0)
     task.cancel()
     assert len(sink.of("telemetry")) >= 18  # 20 Hz despite 30 ms reads
+
+
+async def test_hat_not_responding_is_handed_to_on_fatal():
+    from b3hatd.errors import B3Error
+
+    class Dead(SimBackend):
+        async def read(self):
+            raise B3Error("hat_not_responding", "Build HAT is not responding.")
+
+    fatal = []
+
+    async def on_fatal(error):
+        fatal.append(error.code)
+
+    sink = Sink()
+    loop = TelemetryLoop(Dead(), sink, on_fatal=on_fatal)
+    await loop.step()
+    await loop.step()
+    assert fatal == ["hat_not_responding"]  # once, not every step
+    assert sink.of("telemetry") == []
