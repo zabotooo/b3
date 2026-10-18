@@ -3,6 +3,7 @@
 import asyncio
 import gc
 import logging
+import time
 from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from functools import partial
 
@@ -60,6 +61,14 @@ READ_WAIT = 0.03
 # A healthy read answers within ~50 ms; one older than this means the HAT went silent
 HAT_TIMEOUT = 3.0
 _SILENT_MESSAGE = "Build HAT is not responding. B3 restarts it; reconnect in a moment."
+
+# buildhat releases (coasts) a motor 0.2 s after a positional ramp, and a fast move then rolls
+# on: up to 31 degrees past a go-to target and 148 degrees past a run-for-degrees target, measured
+# on a Large Angular motor (hardware-notes.md "Motor stopping accuracy"). hatd holds the motor
+# until it stands on the target, then releases it, so it stops within a few degrees.
+SETTLE_TOLERANCE = 3  # degrees
+SETTLE_LIMIT = 1.5  # seconds of holding at most
+SETTLE_READS = 3  # consecutive reads on target and not moving
 
 _DIRECTIONS = {"shortest": "shortest", "cw": "clockwise", "ccw": "anticlockwise"}
 
@@ -422,7 +431,16 @@ class BuildHatBackend(HatBackend):
         self._require(port)
         gen = await self._begin(port)
         dev = self._require(port)
-        await self._blocking(port, gen, dev.run_for_degrees, degrees, speed=speed, blocking=True)
+        start = {}
+
+        def move():
+            start["position"] = dev.get()[1]
+            dev.run_for_degrees(degrees, speed=speed, blocking=True)
+
+        def off_target(values):  # buildhat turns the other way for a negative speed
+            return values[1] - (start["position"] + (degrees if speed >= 0 else -degrees))
+
+        await self._blocking(port, gen, self._held_move, port, gen, dev, off_target, move)
 
     async def motor_run_for_seconds(self, port, seconds, speed):
         self._require(port)
@@ -471,8 +489,29 @@ class BuildHatBackend(HatBackend):
         gen = await self._begin(port)
         dev = self._require(port)
         position = ((position + 180) % 360) - 180  # SPIKE 0..359 -> buildhat -180..179
-        await self._blocking(port, gen, dev.run_to_position, position, speed=speed, blocking=True,
+
+        def off_target(values):
+            return ((values[2] - position + 180) % 360) - 180
+
+        await self._blocking(port, gen, self._held_move, port, gen, dev, off_target,
+                             dev.run_to_position, position, speed=speed, blocking=True,
                              direction=_DIRECTIONS[direction])
+
+    def _held_move(self, port: str, gen: int, dev, off_target, move, *args, **kwargs) -> None:
+        """Run a positional buildhat move (in a thread) and hold the motor until it stands on
+        the target, then release it so it can be turned by hand again."""
+        dev.release = False
+        try:
+            move(*args, **kwargs)
+            reads = 0
+            deadline = time.monotonic() + SETTLE_LIMIT
+            while reads < SETTLE_READS and time.monotonic() < deadline and self._generation[port] == gen:
+                values = dev.get()
+                steady = abs(off_target(values)) <= SETTLE_TOLERANCE and abs(values[0]) <= 1
+                reads = reads + 1 if steady else 0
+        finally:
+            dev.release = True
+            dev.coast()
 
     async def light_set(self, port, brightness):
         dev = self._require(port)

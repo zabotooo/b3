@@ -48,8 +48,11 @@ async def test_vin(hat):
 async def test_run_for_degrees(hat):
     before = (await hat.read())[MOTOR]["position"]
     await hat.motor_run_for_degrees(MOTOR, 90, 30)
+    await asyncio.sleep(0.3)
+    await hat.read()  # the first read after the move may still report a cached value
     after = (await hat.read())[MOTOR]["position"]
-    assert 60 <= after - before <= 130  # overshoot is a known issue, see hardware-notes.md
+    print(f"run_for_degrees 90 -> moved {after - before}")
+    assert 82 <= after - before <= 98  # held until it stands there (was up to 148 off before)
 
 
 async def test_negative_speed_turns_back(hat):
@@ -105,13 +108,22 @@ async def test_repeated_interrupts_do_not_leak_threads(hat):
     await asyncio.wait_for(hat.motor_run_for_degrees(MOTOR, 90, 30), 5)
 
 
+async def _turned(hat, seconds=0.5):
+    """Degrees the motor turns in `seconds`, read straight from the motor. A single speed
+    reading right after a start is unreliable: a Technic XL at 30 % reports 3-12 after 0.6 s."""
+    dev = hat._devices[MOTOR]
+    before = (await asyncio.to_thread(dev.get))[1]
+    await asyncio.sleep(seconds)
+    return abs((await asyncio.to_thread(dev.get))[1] - before)
+
+
 async def test_start_right_after_stop_keeps_running(hat):
     await _interrupted_run(hat)
     await hat.motor_start(MOTOR, 30)
-    await asyncio.sleep(0.6)
-    speed = (await hat.read())[MOTOR]["speed"]
+    await asyncio.sleep(0.3)
+    turned = await _turned(hat)
     await hat.motor_stop(MOTOR)
-    assert abs(speed) > 5
+    assert turned > 30
 
 
 ANGULAR = os.environ.get("B3_HW_ANGULAR")    # port with an absolute-position motor
@@ -127,10 +139,10 @@ async def test_new_command_replaces_running_move(hat):
         await asyncio.wait_for(task, 2)
     assert e.value.code == "interrupted"
     assert time.monotonic() - t0 < 1.0
-    await asyncio.sleep(0.6)
-    speed = (await hat.read())[MOTOR]["speed"]
+    await asyncio.sleep(0.3)
+    turned = await _turned(hat)
     await hat.motor_stop(MOTOR)
-    assert abs(speed) > 5
+    assert turned > 30
 
 
 async def test_cancelled_moves_do_not_leak_threads(hat):
@@ -159,7 +171,7 @@ async def test_go_to_spike_position_270(hat):
     await asyncio.sleep(0.3)
     apos = (await hat.read())[ANGULAR]["aposition"]
     print(f"go_to 270 -> aposition {apos}")
-    assert abs(((apos + 90 + 180) % 360) - 180) <= 15
+    assert abs(((apos + 90 + 180) % 360) - 180) <= 8  # held until it stands there (was ±31 before)
 
 
 async def test_color_distance_sensor_values(hat):
