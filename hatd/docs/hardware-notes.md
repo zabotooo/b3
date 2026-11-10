@@ -191,3 +191,23 @@ Hardware suite after the change (3 runs): `run_for_degrees 90` moved 86-90°, `g
 -87…-88 (target -90). `test_start_right_after_stop_keeps_running` was flaky before (a Technic XL at
 30 % reports a speed of 3-12 0.6 s after start); it and `test_new_command_replaces_running_move` now
 check the angle turned in 0.5 s.
+
+### Position PID (2026-11-10)
+
+The hold above stops a motor on the target, but it still swung past it and back several times
+first: buildhat sends the firmware position PID `pid P 0 1 s4 0.0027777778 0 5 0 .1 3 0.01`
+(Kp 5, Ki 0, Kd 0.1), which is weakly damped. With the same ramp, Kp/Ki/Kd swept on ports B and C,
+Kp 8, Kd 0.6 overshot least (motor C: 20-30° → 0-3°; motor B: 32-44° with 4-7 swings → 0-1°) and
+settled in 0.2-0.44 s. Capping the speed or a slow last phase did not help.
+
+hatd replaces the ramp of each encoder motor with the same command and these gains
+(`POSITION_PID`, `damp_positional_moves`). Go to 0 from 90/-100/150°, at speed 35/75/100 %,
+through hatd's ramp:
+
+| Port | overshoot | swings past 0 | final error |
+|---|---|---|---|
+| B | 0° | 0 | at most 3° |
+| C | 0° | 0 | at most 4° |
+| D | 0° | 0 | at most 3° |
+
+Hardware suite on B, C and D: all passed; `run_for_degrees 90` moved 91° / 87° / 87°.
