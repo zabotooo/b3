@@ -70,6 +70,34 @@ SETTLE_TOLERANCE = 3  # degrees
 SETTLE_LIMIT = 1.5  # seconds of holding at most
 SETTLE_READS = 3  # consecutive reads on target and not moving
 
+# buildhat's position PID (Kp 5, Kd 0.1) swings a motor 20-44 degrees past the target and back
+# several times before it stands. Kp 8, Kd 0.6 stopped motors B and C with 0-3 degrees of
+# overshoot and no swing (hardware-notes.md "Motor stopping accuracy").
+POSITION_PID = "8 0 0.6"  # Kp Ki Kd
+
+
+def damp_positional_moves(motor) -> None:
+    """Make a buildhat Motor's run_to_position and run_for_degrees use POSITION_PID.
+    The same ramp as buildhat's Motor._run_positional_ramp (0.6.0), other gains."""
+    def damped_ramp(pos, newpos, speed):
+        if motor._rpm:
+            speed = motor._speed_process(speed)
+        else:
+            speed *= 0.05  # Collapse speed range to -5 to 5
+        dur = abs((newpos - pos) / speed)
+        cmd = (f"port {motor.port}; select 0 ; selrate {motor._interval}; "
+               f"pid {motor.port} 0 1 s4 0.0027777778 0 {POSITION_PID} 3 0.01; "
+               f"set ramp {pos} {newpos} {dur} 0\r")
+        ftr = Future()
+        motor._hat.rampftr[motor.port].append(ftr)
+        motor._write(cmd)
+        ftr.result()
+        if motor._release:
+            time.sleep(0.2)
+            motor.coast()
+
+    motor._run_positional_ramp = damped_ramp
+
 _DIRECTIONS = {"shortest": "shortest", "cw": "clockwise", "ccw": "anticlockwise"}
 
 
@@ -205,7 +233,10 @@ class BuildHatBackend(HatBackend):
 
     # --- ports ------------------------------------------------------------
     def _open(self, port: str, kind: Kind):
-        return getattr(self._buildhat, _CLASS_FOR_KIND[kind])(port)
+        dev = getattr(self._buildhat, _CLASS_FOR_KIND[kind])(port)
+        if kind in (Kind.MOTOR_ABS, Kind.MOTOR_REL):
+            damp_positional_moves(dev)
+        return dev
 
     async def _refresh(self) -> None:
         async with self._lock:
